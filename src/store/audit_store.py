@@ -1,9 +1,12 @@
 import json
 import sqlite3
 from datetime import datetime, timezone
+from pathlib import Path
 from uuid import uuid4
 
 from src.config import SQLITE_DB_PATH
+
+SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 
 
 def now_iso() -> str:
@@ -13,6 +16,7 @@ def now_iso() -> str:
 def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(SQLITE_DB_PATH)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 
@@ -23,52 +27,9 @@ def _row_to_dict(row: sqlite3.Row | None) -> dict | None:
 
 
 def initialize_store() -> None:
+    schema_sql = SCHEMA_PATH.read_text(encoding="utf-8")
     with _connect() as conn:
-        conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS contents (
-                content_id TEXT PRIMARY KEY,
-                creator_id TEXT NOT NULL,
-                content TEXT NOT NULL,
-                status TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                latest_decision_id TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS decisions (
-                decision_id TEXT PRIMARY KEY,
-                content_id TEXT NOT NULL,
-                result TEXT NOT NULL,
-                confidence REAL NOT NULL,
-                ai_likelihood REAL NOT NULL,
-                signals_json TEXT NOT NULL,
-                label_text TEXT NOT NULL,
-                status TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS appeals (
-                appeal_id TEXT PRIMARY KEY,
-                content_id TEXT NOT NULL,
-                decision_id TEXT,
-                creator_id TEXT NOT NULL,
-                reasoning TEXT NOT NULL,
-                status TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS audit_events (
-                event_id TEXT PRIMARY KEY,
-                event_type TEXT NOT NULL,
-                content_id TEXT NOT NULL,
-                decision_id TEXT,
-                appeal_id TEXT,
-                timestamp TEXT NOT NULL,
-                payload_json TEXT NOT NULL
-            );
-            """
-        )
+        conn.executescript(schema_sql)
 
 
 def create_content_record(creator_id: str, content: str) -> dict:
