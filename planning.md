@@ -83,6 +83,7 @@ It can still contribute meaningfully, especially when Groq is borderline.
   - Around `aiLikelihood = 0.10` with strong confidence: likely_human
   - Around `aiLikelihood = 0.50`: uncertain by design
   - Around `aiLikelihood = 0.92` with strong confidence and Groq available: likely_ai
+- Valid decisions statuses:  final, under_review 
 
 
 ## Transparency Label Design
@@ -115,12 +116,19 @@ Write these exact label variants before UI implementation:
 - Appeals hint:
   - AI label includes direct appeal guidance for creator recourse.
 
-
 ## Appeals Workflow
 - Creator submits reasoning tied to a contentId.
 - Appeal is persisted and linked to the latest decision.
 - Content and decision status change to under_review.
 - Appeal action is appended to structured audit log.
+- Valid appeals.status values: under_review, resolved, rejected
+- TODO: Refactor the rest of the project to use `creator_reasoning` consistently for appeal payloads, storage fields, and related documentation.
+- Refactor checklist:
+  - `src/app.py`: keep the active appeals handler on `creator_reasoning` and update the commented legacy example block so it no longer documents `reasoning`.
+  - `src/store/audit_store.py`: rename the `save_appeal(..., reasoning: str)` parameter and returned payload keys to `creator_reasoning`.
+  - `src/store/schema.sql`: rename the `appeals.reasoning` column to `creator_reasoning` if the schema contract is being updated at the database layer too.
+  - `artifacts/provenance_guard_dump.sql`: update example schema and seeded audit payloads so snapshots match the new field name.
+  - `planning.md`: replace the remaining appeal payload examples and schema field references that still say `reasoning`.
 
 ## Anticipated Edge Cases
 - A poem or song lyric with heavy repetition and intentionally simple vocabulary may look machine-like to stylometric heuristics and get a higher AI-risk score.
@@ -144,7 +152,7 @@ Write these exact label variants before UI implementation:
 ## API Surface
 ### 1. **POST/submit** -> signal 1 -> signal 2 -> confidence scoring -> transparency label -> audit log -> response
 ### 2. **POST/appeals** -> status update -> audit log -> response
-### 3. **GET/log** 
+### 3. **GET/log** -> entries: get_audit_log()
 
 ## Architecture
 ```mermaid
