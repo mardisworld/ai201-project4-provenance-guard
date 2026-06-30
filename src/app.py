@@ -18,6 +18,7 @@ from src.store.audit_store import (
     get_audit_log,
     get_content_record,
     get_decision,
+    initialize_store,
     save_appeal,
     save_decision,
 )
@@ -39,14 +40,14 @@ def home():
     return "Provenance Guard is running."
 
 @app.route("/submit", methods=["POST"])
-@limiter.limit("10 per minute;100 per day")
+@limiter.limit(RATE_LIMIT_SUBMIT)
 def submit():
     body = request.get_json(silent=True) or {}
     creator_id = body.get("creator_id")
     content = body.get("content")
 
     if not creator_id or not isinstance(content, str) or not content.strip():
-        return jsonify({"error": "creator_id and content are required."}), 400
+        return jsonify({"error": "creator_id and content are required."})
 
     content_record = create_content_record(creator_id=creator_id, content=content)
     classification = classify_content(content)
@@ -61,20 +62,18 @@ def submit():
         label_text=label_text,
     )
 
-    return (
-        jsonify(
-            {
-                "content_id": content_record["contentId"],
-                "creator_id": creator_id,
-                "attribution": decision["result"],
-                "confidence": round(decision["confidence"], 3),
-                "ai_likelihood": round(decision["aiLikelihood"], 3),
-                "label": decision["labelText"],
-                "signals": decision["signals"],
-                "status": content_record["status"],
-                "decision_id": decision["decisionId"],
-            }
-        ),
+    return jsonify(
+        {
+            "content_id": content_record["contentId"],
+            "creator_id": creator_id,
+            "attribution": decision["result"],
+            "confidence": round(decision["confidence"], 3),
+            "ai_likelihood": round(decision["aiLikelihood"], 3),
+            "label": decision["labelText"],
+            "signals": decision["signals"],
+            "status": content_record["status"],
+            "decision_id": decision["decisionId"],
+        }
     )
 
 
@@ -86,14 +85,29 @@ def appeal():
     creator_reasoning = data.get("creator_reasoning")
 
     if not content_id or not creator_id or not isinstance(creator_reasoning, str) or not creator_reasoning.strip():
-        return jsonify({"error": "content_id, creator_id, and creator_reasoning are required."}), 400
+        return jsonify({"error": "content_id, creator_id, and creator_reasoning are required."})
 
-    # Update the content's status and log the appeal (see section 6).
-    return jsonify({
-        "content_id": content_id,
-        "status": "under_review",
-        "message": "Your appeal was received and is under review.",
-    })
+    creator_reasoning = creator_reasoning.strip()
+
+    existing = get_content_record(content_id)
+    if not existing:
+        return jsonify({"error": "content_id not found."})
+    
+    result = save_appeal(
+        content_id=content_id,
+        creator_id=creator_id,
+        reasoning=creator_reasoning,
+    )
+
+    return jsonify(
+        {
+            "message": "Appeal submitted. Content is now under review.",
+            "content_id": content_id,
+            "status": result["content"]["status"] if result and result.get("content") else "under_review",
+            "appeal": result["appeal"] if result else None,
+            "decision": result["decision"] if result else None,
+        }
+    )
 
 
 @app.route("/log", methods=["GET"])
@@ -131,7 +145,7 @@ def read_log(limit=20):
     return [dict(row) for row in rows]
 
 if __name__ == "__main__":
-    init_db()
+    initialize_store()
     app.run(host="127.0.0.1", port=PORT, debug=True)
 
 
