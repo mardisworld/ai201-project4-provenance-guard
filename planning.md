@@ -141,6 +141,88 @@ The submitted content text. A system instruction to score conservatively (to red
 **A[A. Providence Guard] --> M[M. GET/log]**: A sends a read request to M, including an HTTP GET/log, no JSON body, for the purpose of asking the system the structured audit history. See audit payload in next entry. 
 **I[I. SQLite Structured Audit Log] --> M[M. GET/log response handler]**: Audit Payload: eventType: classification_decision, contentId, decisionId, timestamp,  Decision Outputs: result (likely_ai, likely_human, uncertain), confidence, Signal Evidence: Groq signal, stylometric signal, and weights, Transparence Label: label text"
 
+## Data Persistance
+
+**1. Create SQLite schema on app startup** 
+- Initialize database file at SQLITE_DB_PATH.
+- Create tables if they do not exist.
+
+**2. Create contents table** 
+Fields: content_id, creator_id, content, status, created_at, updated_at, latest_decision_id.
+
+**3. Create decisions table**
+Fields: decision_id, content_id, result, confidence, ai_likelihood, signals_json, label_text, status, created_at.
+
+**4. Create appeals table** 
+Fields: appeal_id, content_id, decision_id, creator_id, reasoning, status, created_at.
+
+**5. Create audit_events table**
+Fields: event_id, event_type, content_id, decision_id, appeal_id, timestamp, payload_json.
+
+**6. Add integrity constraints**
+- Check constraints for valid statuses/results.
+- Numeric bounds for confidence and ai_likelihood in [0,1].
+- Foreign keys where appropriate.
+
+**7. Add performance indexes** 
+- Index by content_id, decision_id, appeal_id, event_type, and timestamp.
+
+**8. Validate schema in final test pass**
+- Confirm all 4 tables are created.
+- Confirm submit writes contents, decisions, audit_events.
+- Confirm appeal writes appeals and audit_events and updates status.
+
+**9. Add foreign keys**
+A. decisions.content_id -> contents.content_id
+- Every decision must belong to an existing content submission.
+- Use ON DELETE CASCADE (if content is removed, its decisions are removed too).
+
+B. appeals.content_id -> contents.content_id
+- Every appeal must reference existing content.
+- Use ON DELETE CASCADE (if content is removed, its decisions are removed too).
+
+C. appeals.decision_id -> decisions.decision_id (nullable)
+- Appeals are typically tied to a specific decision.
+- Keep nullable in case you ever allow appeals before a stored decision exists.
+- Use ON DELETE SET NULL (safer than cascade here).
+
+D. contents.latest_decision_id -> decisions.decision_id (nullable)
+- Tracks the current/latest decision pointer on content.
+- Use ON DELETE SET NULL.
+
+E. audit_events.content_id -> contents.content_id 
+- Keeps event log tied to real content rows.
+- Provides strict integrity.
+
+F. audit_events.decision_id -> decisions.decision_id (optional, nullable)
+- Keeps event decision tied to real decision rows.
+- Provides strict integrity.
+
+G. audit_events.appeal_id -> appeals.appeal_id (optional, nullable)
+
+
+## SQLite Persistence and Integrity Plan
+Provenance Guard persists all records to SQLite using a centralized schema file: schema.sql. On startup, audit_store.py calls initialize_store(), which loads and executes that SQL script. The schema defines:
+
+contents: submission records and current status
+decisions: attribution outputs (result, confidence, ai_likelihood, signals_json, label_text)
+appeals: creator disputes and review status
+audit_events: immutable structured log entries for both classification and appeal actions
+Integrity rules include:
+
+CHECK constraints for valid statuses/results and score bounds in [0,1]
+Foreign keys linking decisions, appeals, and audit events to parent records
+ON DELETE behaviors (CASCADE / SET NULL) to preserve consistency
+Performance support includes indexes on:
+
+contents.creator_id
+decisions.content_id
+appeals.content_id
+audit_events.content_id, audit_events.event_type, audit_events.timestamp
+
+------------------------------------------------------------------------------------
+
+
 ## Implementation Checklist
 
 ### 1. app.py
@@ -149,22 +231,21 @@ The submitted content text. A system instruction to score conservatively (to red
 - Wire rate limiter onto POST /submit.
 - Return structured JSON responses and status codes (201, 400, 404, 429).
 
-### 2. config.py
+### 2. Centralize configuration in config.py
 - Load .env values (PORT, RATE_LIMIT_SUBMIT, GROQ_API_KEY, GROQ_MODEL, GROQ_API_URL, SQLITE_DB_PATH).
-- Provide safe defaults when env vars are missing.
-- Keep config constants centralized (no hardcoded values in route logic).
+- Keep defaults in code and read overrides from 
 
-## 3. groq_client.py
-- Build Groq request wrapper for llama-3.3-70b-versatile.
+### 3. Implement Groq signal client in groq_client.py
+- Send content to llama-3.3-70b-versatile.
 - Prompt model to return JSON with ai_likelihood and rationale.
 - Parse response robustly and clamp likelihood to [0,1].
 - Add graceful fallback output when API key/network/model fails.
 
-## 4. classifier.py
+### 4. Implement stylometric signal + ensemble in classifier.py
 - Implement stylometric calculations:
-    - lexical diversity risk
-    - sentence burstiness risk
-    - stylometric weighted score (0.55/0.45)
+    - Compute lexical diversity risk
+    - Compute sentence burstiness risk
+    - Combine stylometric sub-signals. (0.55/0.45)
 - Combine Groq + stylometric scores (0.65/0.35).
 - Compute confidence score.
 - Map to decision bucket:
@@ -173,48 +254,50 @@ The submitted content text. A system instruction to score conservatively (to red
     - uncertain
 - Return complete signal object for auditability.
 
-## 5. labels.py
+### 5. Build transparency label logic in labels.py
 - Store exact 3 label templates (AI, human, uncertain).
 - Implement build_transparency_label(result, confidence).
 - Convert confidence to rounded percent for label text.
 
-## 6. audit_store.py
+### 6. Implement SQLite persistence and audit logging in audit_store.py
 - Initialize SQLite schema:
     - contents
     - decisions
     - appeals
     - audit_events
 - Implement helpers:
-    - create content record
-    - save decision
-    - save appeal
+    - create and save content records
+    - save decisions
+    - save appeals
+    - save structured audit events
     - fetch log entries
 - Ensure every decision and appeal writes structured audit event rows.
 
-## 7. requirements.txt
+### 7. Finalize dependencies in requirements.txt
 - Ensure required packages are present:
     - flask
     - flask-limiter
     - groq
     - python-dotenv
 
-## 8. .env and .gitignore
-- .env: set config keys (no secrets committed).
-- .gitignore: ensure .env, *.db, .venv, __pycache__ are ignored.
+### 8. Configure environment and ignores
+- .env: set runtime keys and API settings.
+- .gitignore: ensure .env, *.db, .venv, __pycache__, and cache files are ignored.
 
-## 9. README.md
+### 9. Complete README evidence
 - Confirm endpoint documentation matches implementation.
+- Document endpoints and expected payloads.
 - Include exact transparency label text variants.
-- Document chosen rate limits and reasoning.
+- Document rate-limit values and rationale.
 - Include sample GET /log output with 3+ entries.
 - Add quick-start run commands for Python. 
 
-## 10. planning.md
+### 10. Keep planning.md aligned with implementatio
 - Keep architecture diagram synced to real code flow.
-- Keep signal rationale and weights consistent with classifier logic.
+- Keep weights, thresholds, and signal explanations consistent with code.
 
 
-## 11. Final validation pass (manual)
+### 11. Run final manual validation
 - Start app.
 - Run:
     - 2 x POST /submit
@@ -222,5 +305,7 @@ The submitted content text. A system instruction to score conservatively (to red
     - 1 x GET /log
 - Confirm:
     - labels render correctly
-    - appeal sets under_review
+    - appeal sets status to under_review
     - log has structured entries for decisions + appeal
+
+
