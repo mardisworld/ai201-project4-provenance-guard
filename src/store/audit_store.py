@@ -45,13 +45,13 @@ def create_content_record(creator_id: str, content: str) -> dict:
         )
 
     return {
-        "contentId": content_id,
-        "creatorId": creator_id,
+        "content_id": content_id,
+        "creator_id": creator_id,
         "content": content,
         "status": "classified",
         "createdAt": created_at,
         "updatedAt": created_at,
-        "latestDecisionId": None,
+        "latest_decision_id": None,
     }
 
 
@@ -61,14 +61,28 @@ def append_audit_entry(
     payload: dict,
     decision_id: str | None = None,
     appeal_id: str | None = None,
+    creator_id: str | None = None,
+    attribution: str | None = None,
+    confidence: float | None = None,
+    llm_score: float | None = None,
+    stylometric_score: float | None = None,
+    status: str | None = None,
 ) -> None:
     with _connect() as conn:
         conn.execute(
             """
-            INSERT INTO audit_events (event_id, event_type, content_id, decision_id, appeal_id, timestamp, payload_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO audit_events (
+                event_id, event_type, content_id, creator_id, timestamp,
+                attribution, confidence, llm_score, stylometric_score, status,
+                decision_id, appeal_id, payload_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (str(uuid4()), event_type, content_id, decision_id, appeal_id, now_iso(), json.dumps(payload)),
+            (
+                str(uuid4()), event_type, content_id, creator_id, now_iso(),
+                attribution, confidence, llm_score, stylometric_score, status,
+                decision_id, appeal_id, json.dumps(payload),
+            ),
         )
 
 
@@ -118,18 +132,23 @@ def save_decision(
         payload={
             "result": result,
             "confidence": confidence,
-            "aiLikelihood": ai_likelihood,
+            "ai_likelihood": ai_likelihood,
             "signals": signals,
             "labelText": label_text,
         },
+        attribution=result,
+        confidence=confidence,
+        llm_score=(signals.get("groqSignal") or {}).get("ai_likelihood"),
+        stylometric_score=(signals.get("stylometricSignal") or {}).get("ai_likelihood"),
+        status="final",
     )
 
     return {
-        "decisionId": decision_id,
-        "contentId": content_id,
+        "decision_id": decision_id,
+        "content_id": content_id,
         "result": result,
         "confidence": confidence,
-        "aiLikelihood": ai_likelihood,
+        "ai_likelihood": ai_likelihood,
         "signals": signals,
         "labelText": label_text,
         "status": "final",
@@ -152,13 +171,13 @@ def get_content_record(content_id: str) -> dict | None:
     if not data:
         return None
     return {
-        "contentId": data["content_id"],
-        "creatorId": data["creator_id"],
+        "content_id": data["content_id"],
+        "creator_id": data["creator_id"],
         "content": data["content"],
         "status": data["status"],
         "createdAt": data["created_at"],
         "updatedAt": data["updated_at"],
-        "latestDecisionId": data["latest_decision_id"],
+        "latest_decision_id": data["latest_decision_id"],
     }
 
 
@@ -177,11 +196,11 @@ def get_decision(decision_id: str) -> dict | None:
     if not data:
         return None
     return {
-        "decisionId": data["decision_id"],
-        "contentId": data["content_id"],
+        "decision_id": data["decision_id"],
+        "content_id": data["content_id"],
         "result": data["result"],
         "confidence": data["confidence"],
-        "aiLikelihood": data["ai_likelihood"],
+        "ai_likelihood": data["ai_likelihood"],
         "signals": json.loads(data["signals_json"]),
         "labelText": data["label_text"],
         "status": data["status"],
@@ -189,27 +208,27 @@ def get_decision(decision_id: str) -> dict | None:
     }
 
 
-def save_appeal(content_id: str, creator_id: str, reasoning: str) -> dict | None:
+def save_appeal(content_id: str, creator_id: str, creator_reasoning: str) -> dict | None:
     content = get_content_record(content_id)
     if not content:
         return None
 
-    decision = get_decision(content["latestDecisionId"]) if content.get("latestDecisionId") else None
+    decision = get_decision(content["latest_decision_id"]) if content.get("latest_decision_id") else None
     appeal_id = str(uuid4())
     created_at = now_iso()
 
     with _connect() as conn:
         conn.execute(
             """
-            INSERT INTO appeals (appeal_id, content_id, decision_id, creator_id, reasoning, status, created_at)
+            INSERT INTO appeals (appeal_id, content_id, decision_id, creator_id, creator_reasoning, status, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 appeal_id,
                 content_id,
-                decision["decisionId"] if decision else None,
+                decision["decision_id"] if decision else None,
                 creator_id,
-                reasoning,
+                creator_reasoning,
                 "under_review",
                 created_at,
             ),
@@ -229,15 +248,15 @@ def save_appeal(content_id: str, creator_id: str, reasoning: str) -> dict | None
                 SET status = 'under_review'
                 WHERE decision_id = ?
                 """,
-                (decision["decisionId"],),
+                (decision["decision_id"],),
             )
 
     appeal = {
         "appealId": appeal_id,
-        "contentId": content_id,
-        "decisionId": decision["decisionId"] if decision else None,
-        "creatorId": creator_id,
-        "reasoning": reasoning,
+        "content_id": content_id,
+        "decision_id": decision["decision_id"] if decision else None,
+        "creator_id": creator_id,
+        "creator_reasoning": creator_reasoning,
         "status": "under_review",
         "createdAt": created_at,
     }
@@ -245,17 +264,23 @@ def save_appeal(content_id: str, creator_id: str, reasoning: str) -> dict | None
     append_audit_entry(
         event_type="appeal_submitted",
         content_id=content_id,
-        decision_id=appeal["decisionId"],
+        decision_id=appeal["decision_id"],
         appeal_id=appeal_id,
+        creator_id=creator_id,
+        attribution=decision["result"] if decision else None,
+        confidence=decision["confidence"] if decision else None,
+        llm_score=(decision["signals"].get("groqSignal") or {}).get("ai_likelihood") if decision else None,
+        stylometric_score=(decision["signals"].get("stylometricSignal") or {}).get("ai_likelihood") if decision else None,
+        status="under_review",
         payload={
-            "creatorId": creator_id,
-            "reasoning": reasoning,
+            "creator_id": creator_id,
+            "creator_reasoning": creator_reasoning,
             "updatedContentStatus": "under_review",
         },
     )
 
     updated_content = get_content_record(content_id)
-    updated_decision = get_decision(content["latestDecisionId"]) if content.get("latestDecisionId") else None
+    updated_decision = get_decision(content["latest_decision_id"]) if content.get("latest_decision_id") else None
     return {"content": updated_content, "decision": updated_decision, "appeal": appeal}
 
 
@@ -263,7 +288,9 @@ def get_audit_log() -> list[dict]:
     with _connect() as conn:
         rows = conn.execute(
             """
-            SELECT event_id, event_type, content_id, decision_id, appeal_id, timestamp, payload_json
+            SELECT event_id, event_type, content_id, creator_id, timestamp,
+                   attribution, confidence, llm_score, stylometric_score, status,
+                   decision_id, appeal_id, payload_json
             FROM audit_events
             ORDER BY timestamp ASC
             """
@@ -276,10 +303,16 @@ def get_audit_log() -> list[dict]:
             {
                 "eventId": data["event_id"],
                 "eventType": data["event_type"],
-                "contentId": data["content_id"],
-                "decisionId": data["decision_id"],
-                "appealId": data["appeal_id"],
+                "content_id": data["content_id"],
+                "creator_id": data["creator_id"],
                 "timestamp": data["timestamp"],
+                "attribution": data["attribution"],
+                "confidence": data["confidence"],
+                "llm_score": data["llm_score"],
+                "stylometric_score": data["stylometric_score"],
+                "status": data["status"],
+                "decision_id": data["decision_id"],
+                "appealId": data["appeal_id"],
                 "payload": json.loads(data["payload_json"]),
             }
         )

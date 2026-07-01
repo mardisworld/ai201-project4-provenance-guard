@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS appeals (
     content_id TEXT NOT NULL,
     decision_id TEXT,
     creator_id TEXT NOT NULL,
-    reasoning TEXT NOT NULL,
+    creator_reasoning TEXT NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('under_review', 'resolved', 'rejected')),
     created_at TEXT NOT NULL,
     FOREIGN KEY (content_id)
@@ -48,9 +48,15 @@ CREATE TABLE IF NOT EXISTS audit_events (
     event_id TEXT PRIMARY KEY,
     event_type TEXT NOT NULL,
     content_id TEXT NOT NULL,
+    creator_id TEXT,
+    timestamp TEXT NOT NULL,
+    attribution TEXT,
+    confidence REAL,
+    llm_score REAL,
+    stylometric_score REAL,
+    status TEXT CHECK (status IN ('final', 'under_review', 'classified')),
     decision_id TEXT,
     appeal_id TEXT,
-    timestamp TEXT NOT NULL,
     payload_json TEXT NOT NULL,
     FOREIGN KEY (content_id)
         REFERENCES contents(content_id)

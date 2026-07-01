@@ -38,15 +38,16 @@ Creative platforms where people share original work — writing, music, and art,
       - Measures how much sentence lengths vary.
       - Human writing often has a mix of short and long sentences (more bursty).
       - Very uniform sentence lengths can look more machine-like, so risk goes up.
+      - With only one sentence, length variance is undefined, so burstiness risk defaults to a neutral 0.5 (rather than the maximum) to avoid biasing single-sentence inputs toward AI.
   - **“Combines … risk” means:**
       - You compute both risks on a 0 to 1 scale.
       - Then you take a weighted average to form one stylometric AI-likelihood component.
 
 I chose the stylometric weights as 0.55 for lexical diversity risk and 0.45 for sentence burstiness risk because lexical diversity is usually a slightly more stable indicator across short and medium-length texts, while burstiness is valuable but more sensitive to genre and formatting. The near-balanced split keeps both signals influential, avoids over-reliance on a single heuristic, and supports a conservative scoring design that reduces overconfident false-positive AI labels.
 
-### 3. Ensemble weighting:
-  - Groq signal weight: 0.65
-  - Stylometric signal weight: 0.35
+### 3. Ensemble weighting (revised in M4 calibration; originally 0.65 / 0.35):
+  - Groq signal weight: 0.80 (originally 0.65)
+  - Stylometric signal weight: 0.20 (originally 0.35)
   - If Groq is unavailable, fallback forces conservative `uncertain` decision.
 
 I weighted Groq at 0.65 and stylometric heuristics at 0.35 because they play different roles in reliability and coverage:
@@ -61,6 +62,14 @@ It is deterministic, local, and cheap to compute.
 It provides an independent cross-check against model output.
 It can still contribute meaningfully, especially when Groq is borderline.
 
+### Model Recalibration (M4 tuning — changed from the original design)
+The original design (Groq 0.65 / stylometric 0.35; `likely_ai` at `aiLikelihood >= 0.86` and `confidence >= 0.75`; and a "score conservatively" Groq prompt) under-detected AI. On a 4-sample ground-truth check it left clearly AI-generated text as `uncertain` and never reached `likely_ai`. Three changes were made:
+- **Groq prompt:** replaced the "score conservatively" instruction with a calibrated one that uses the full 0–1 range and explicitly states that formal/academic/domain-expert writing is not by itself evidence of AI (high scores only when the text is also generic, hedging, or filler-heavy).
+- **Weights:** Groq `0.65 -> 0.80`, stylometric `0.35 -> 0.20`, because the stylometric signal proved non-discriminative on the test set (clustered ~0.32–0.41 regardless of source) and was dragging correct AI detections toward the middle.
+- **Thresholds:** `likely_ai` lowered from `aiLikelihood >= 0.86` / `confidence >= 0.75` to `aiLikelihood >= 0.65` / `confidence >= 0.65` so genuine AI is reachable; `likely_human` (`<= 0.30`, `confidence >= 0.70`) unchanged.
+
+After tuning: clear AI -> `likely_ai`, clear human -> `likely_human`, formal human -> `uncertain`. Lightly-edited/hybrid AI can still read as human (a known edge case) and is handled via the appeals workflow rather than more aggressive thresholds.
+
 ## Uncertainty Representation, Confidence and Decision Rules
 
 - aiLikelihood is a continuous score in the range [0,1].
@@ -68,7 +77,7 @@ It can still contribute meaningfully, especially when Groq is borderline.
   - 1.0 means very likely AI-generated.
   - Values near 0.5 represent ambiguity, so they are typically treated as uncertain.
 - Signal fusion for aiLikelihood:
-  - If Groq is available: `aiLikelihood = clamp(0.65 * groq + 0.35 * stylometric)`
+  - If Groq is available: `aiLikelihood = clamp(0.80 * groq + 0.20 * stylometric)` (originally 0.65 / 0.35)
   - If Groq is unavailable: `aiLikelihood = clamp(1.0 * stylometric)` and the system later forces uncertain as a safety guardrail.
 - Confidence is calculated from both decisiveness and cross-signal agreement:
   - `distance_from_mid = abs(aiLikelihood - 0.5) * 2`
@@ -76,9 +85,12 @@ It can still contribute meaningfully, especially when Groq is borderline.
   - `confidence = clamp(0.35 + 0.45 * distance_from_mid + 0.20 * agreement)`
   - If Groq is unavailable, confidence is down-weighted by 25 percent and the result is forced to `uncertain`.
 - Final decision buckets:
-  - likely_ai when `aiLikelihood >= 0.86` and `confidence >= 0.75` and Groq is available
+  - likely_ai when `aiLikelihood >= 0.65` and `confidence >= 0.65` and Groq is available (originally >= 0.86 / >= 0.75)
   - likely_human when `aiLikelihood <= 0.30` and `confidence >= 0.70`
   - uncertain otherwise
+- Short-text guard:
+  - Submissions with fewer than 15 words (on the normalized text) provide too little lexical and structural signal for reliable attribution, and the stylometric burstiness metric degenerates on single-sentence inputs.
+  - When triggered, the result is forced to `uncertain` and confidence is down-weighted by 25 percent, overriding the buckets above.
 - Interpretation examples:
   - Around `aiLikelihood = 0.10` with strong confidence: likely_human
   - Around `aiLikelihood = 0.50`: uncertain by design
@@ -117,12 +129,12 @@ Write these exact label variants before UI implementation:
   - AI label includes direct appeal guidance for creator recourse.
 
 ## Appeals Workflow
-- Creator submits reasoning tied to a contentId.
+- Creator submits creator_reasoning tied to a content_id.
 - Appeal is persisted and linked to the latest decision.
 - Content and decision status change to under_review.
 - Appeal action is appended to structured audit log.
 - Valid appeals.status values: under_review, resolved, rejected
-- TODO: Refactor the rest of the project to use `creator_reasoning` consistently for appeal payloads, storage fields, and related documentation.
+- DONE (M5): The project now uses `creator_reasoning` consistently across the appeal payload, `save_appeal`, the `appeals.creator_reasoning` schema column, the audit payload, and the response. (Checklist below kept as a record of the change.)
 - Refactor checklist:
   - `src/app.py`: keep the active appeals handler on `creator_reasoning` and update the commented legacy example block so it no longer documents `reasoning`.
   - `src/store/audit_store.py`: rename the `save_appeal(..., reasoning: str)` parameter and returned payload keys to `creator_reasoning`.
@@ -132,7 +144,7 @@ Write these exact label variants before UI implementation:
 
 ## Anticipated Edge Cases
 - A poem or song lyric with heavy repetition and intentionally simple vocabulary may look machine-like to stylometric heuristics and get a higher AI-risk score.
-- Very short submissions (for example, one sentence or a title-only post) provide too little signal for reliable attribution and may be forced into uncertain.
+- Very short submissions (for example, one sentence or a title-only post) provide too little signal for reliable attribution and are forced into uncertain by the short-text guard (fewer than 15 words).
 - Highly edited human writing that is intentionally formal and template-driven (such as scholarship statements) can resemble LLM style and trigger false positives.
 - Hybrid drafts where AI generated a base and a human heavily revised it can produce mixed cues, reducing confidence calibration reliability.
 
@@ -185,7 +197,7 @@ I tried to update the arrows on Mermaid, but was ultimately unsuccessful in doin
   **B[B. POST /submit] --> C[C. Rate Limiter\n12 requests / 15 minutes / IP]**: Client identity key (typically IP address), Route key (POST /submit), Current timestamp/request count context 
 **C[C. Rate Limiter] --> D[D. Classifier Pipeline]**: Sends one of two outcomes: 1. Allowed request (passes through) or 2. Blocked request (429 Too Many Requests).
 **D[D. Classifier Pipeline] --> D1[D1. Groq LLM Signal\nllama-3.3-70b-versatile]**:
-The submitted content text. A system instruction to score conservatively (to reduce false-positive AI accusations). A user instruction asking for JSON output with: ai_likelihood in the range [0, 1], rationale text
+The submitted content text. A calibrated system instruction (revised in M4 from the original "score conservatively" guidance) that uses the full 0-1 range and treats formal/academic writing as not by itself AI evidence. A user instruction asking for JSON output with: ai_likelihood in the range [0, 1], rationale text
 **D[D. Classifier Pipeline] --> D2[D2. Stylometric Heuristics Signal]**: same information that was sent to D1 Groq LLM signal
 **D1[D1. Groq LLM Signal\nllama-3.3-70b-versatile] --> E[E. Weighted AI Likelihood + Confidence]**: ai_likelihood (0 = likely human, 1 = likely AI), rationale (brief explanation), availability/error fallback data if the call fails 
 **D2[D2. Stylometric Heuristics Signal] --> E[E. Weighted AI Likelihood + Confidence]**: Combined stylometric AI-likelihood score in [0, 1] based on lexical diversity risk and sentence burstiness risk.
@@ -195,8 +207,8 @@ The submitted content text. A system instruction to score conservatively (to red
   **F[F. "Decision Bucket + Confidence"] --> G[G. Transparency Label Builder]**: Uses those two values to assign likely_ai, likely_human, or uncertain and sends them to Transparency Label Builder.
   **G[G. Transparency Label Builder] --> H[H. JSON Response]** : transparencyLabel (human-readable sentence with confidence percent filled in)
 **F[F. "Decision Bucket + Confidence"] --> I[I. SQLite Structured Audit Log]**: A full auditable classification event is written to SQLite: 1. Decision Outcome: result (likely_ai, likely_human, or uncertain), confidence, ai_likelihood, 2. Content Identifiers: contentId, decisionId, timestamp/event type 3. Evidence and output: signals used, labelText (transparencyLabel)
-**A[A. Providence Guard] --> J[J. POST/appeals]**:  Payload: {"contentId": "20d2d201-e5ba-4eec-9ca1-712e6330180e", "creatorId":  "creator-1", "reasoning": "This draft came from my notebook revisions and timestamped edits."}
-**J[J. POST/appeals] --> K[K. Appeals Handler]**: sends validated appeal payload to Appeals Handler. Payload is the same as A -> J. Payload: {"contentId": "20d2d201-e5ba-4eec-9ca1-712e6330180e", "creatorId":  "creator-1", "reasoning": "This draft came from my notebook revisions and timestamped edits."}
+**A[A. Providence Guard] --> J[J. POST/appeals]**:  Payload: {"contentId": "20d2d201-e5ba-4eec-9ca1-712e6330180e", "creatorId":  "creator-1", "creator_reasoning": "This draft came from my notebook revisions and timestamped edits."}
+**J[J. POST/appeals] --> K[K. Appeals Handler]**: sends validated appeal payload to Appeals Handler. Payload is the same as A -> J. Payload: {"contentId": "20d2d201-e5ba-4eec-9ca1-712e6330180e", "creatorId":  "creator-1", "creator_reasoning": "This draft came from my notebook revisions and timestamped edits."}
 *** K[K. Appeals Handler] --> L[L. Set Status under_review]***: K sends a status change instruction to L: 1. target record IDs (contentId, and decisionId if present), 2. new status value: under_review, 3. update timestamp/context for persistence and audit.
 *** K[K. Appeals Handler] --> I[I. SQLite Structured Audit Log]***: K (Appeals Handler) sends an appeal audit event to I (SQLite Structured Audit Log). It logs: 1. eventType: appeal_submitted, 2. IDs: contentId, decisionId (if available), appealId, 3. timestamp; 4. payload fields such as: creatorId, reasoning, updatedContentStatus = under_review
 **A[A. Providence Guard] --> M[M. GET/log]**: A sends a read request to M, including an HTTP GET/log, no JSON body, for the purpose of asking the system the structured audit history. See audit payload in next entry. 
@@ -421,3 +433,22 @@ audit_events.content_id, audit_events.event_type, audit_events.timestamp
     - log has structured entries for decisions + appeal
 
 
+## Implementation Notes (divergences from the original plan)
+
+The following reflect where the built system differs from the plan above:
+
+- **Rate limit:** configurable via `RATE_LIMIT_SUBMIT` in `.env`; currently set to
+  `10 per minute` (the original plan specified 12 per IP per 15 minutes).
+- **Appeals endpoint:** the route is `POST /appeal` (singular), not `/appeals`.
+- **`audit_events` columns:** in addition to the planned fields, the table has
+  `creator_id`, `attribution`, `confidence`, `llm_score` (Groq signal),
+  `stylometric_score`, and `status`, so each audit row is self-contained.
+- **`appeals.reasoning` → `creator_reasoning`:** the column and payload field were
+  renamed to `creator_reasoning`.
+- **Extra endpoints:** `GET /` returns `{service, status}` and `GET /health`
+  returns `{ok, service}`.
+- **`GET /log` response:** each entry includes the flat columns above alongside the
+  structured `payload`.
+- **Field naming:** request/response payloads use snake_case
+  (`content_id`, `creator_id`, `creator_reasoning`); some example payloads above
+  still show camelCase and are illustrative only.
