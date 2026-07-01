@@ -216,3 +216,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Provenance Guard SQLite databases (generated at runtime from schema.sql)
+*.db
+*.db-journal
